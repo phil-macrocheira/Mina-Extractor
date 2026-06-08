@@ -1,5 +1,5 @@
-# Mina-Extractor
-A file extractor for Mina the Hollower by Yacht Club Games.
+# Mina Extractor
+A C# console app file extractor for Mina the Hollower by Yacht Club Games.
 
 Simply run the program to use. Attempts to automatically find your Mina files, but it will ask for the path to your game install if it cannot be found.
 
