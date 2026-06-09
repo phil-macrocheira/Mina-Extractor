@@ -27,18 +27,19 @@ static class Program
         var possiblePaths = GetPossibleGamePaths();
         foreach (string path in possiblePaths) {
             if (IsValidGamePath(path)) {
-                Console.WriteLine($"Mina install path found at {path}");
+                Console.WriteLine($"Mina install path found at {path}\n");
                 return path;
             }
         }
         if (!foundPath) {
-            Console.WriteLine($"Mina install path not found automatically. Please enter path to 'Mina the Hollower' folder.");
+            Console.WriteLine($"Mina install path not found automatically. Please enter path to 'Mina the Hollower' folder.\n");
             while (true) {
                 gamePath = Console.ReadLine();
                 if (IsValidGamePath(gamePath)) {
+                    Console.WriteLine($"Mina install path set to {gamePath}\n");
                     return gamePath;
                 }
-                Console.WriteLine($"Not a valid Mina install path. Please enter path to 'Mina the Hollower' folder.");
+                Console.WriteLine($"Not a valid Mina install path. Please enter path to 'Mina the Hollower' folder.\n");
             }
         }
         return gamePath;
@@ -99,7 +100,7 @@ static class Program
                 Console.Error.WriteLine($"[{file}] {e.Message}");
             }
         }
-        Console.WriteLine($"Done! Extracted {files} files from {archives} archives.");
+        Console.WriteLine($"Done! Extracted {files} files from {archives} archives.\n");
     }
 
     // Parse the YCD container at `base`. If its node table is a directory,
@@ -224,7 +225,7 @@ static class Program
                 Console.Error.WriteLine($"[{anb_file}] {e.Message}");
             }
         }
-        Console.WriteLine($"Done! Extracted {sprites} sprites from {banks} banks.");
+        Console.WriteLine($"Done! Extracted {sprites} sprites from {banks} banks.\n");
     }
     static int ExtractBank(byte[] f, string extractPath, string palRoot, string anbDir, bool noPalette)
     {
@@ -361,7 +362,7 @@ static class Program
                 var (a, b) = fdef[pos];
                 string stem = count > 1 ? $"{name}_{i:D2}" : name;
                 if (a >= 0 && a < nc && cells[a] == null) cells[a] = stem;
-                if (b >= 0 && b < nc && cells[b] == null) cells[b] = stem + "_fx";
+                if (b >= 0 && b < nc && cells[b] == null) cells[b] = stem + "_subsprite";
             }
         }
 
@@ -389,37 +390,39 @@ static class Program
         }
         return tags;
     }
-    // Frame-def table: maps each animation frame position to its cell index(es).
-    //   record (0x38): { u32 cellA, u32 cellB (0xFFFFFFFF = none), 4x float,
-    //                    u32 kind(0x10/0x20), u32 count, u32 0x38, i32 ptr, ... }
-    // cellB present => a (sprite, effect) pair. Found via the 0x38 marker at
-    // +0x20 on the first record (cellA==0); then walked until the accumulated
-    // cell count reaches nc (the last record may omit the 0x38 marker).
+    // Frame-def table: maps each animation frame position -> its cell index(es).
+    //   record (0x38): u32 cellA, u32 cellB (0xFFFFFFFF = none), then per-record
+    //   layout data (offsets/dimensions/sub-field pointers) whose shape varies.
+    // cellB present => a (sprite, sub-sprite) pair. Some banks carry a 0x38 marker
+    // at +0x20, but many don't (the layout tail differs per record), so instead the
+    // table is identified by an invariant that holds everywhere: cellA equals the
+    // running cell count (starts at 0; +1 per single record, +2 per pair). It is
+    // walked until that count reaches nc; any deviation rejects the candidate so a
+    // false start yields numeric names rather than wrong ones.
     static List<(int a, int b)> ParseFrameDef(byte[] f, int start, int sect, int nc)
     {
-        int p0 = -1;
-        for (int pt = start; pt + 0x24 <= sect; pt += 4) {
-            if (U32(f, pt) != 0) continue; // cellA == 0
-            uint kind = U32(f, pt + 0x18);
+        for (int p0 = start; p0 + 0x20 <= sect; p0 += 4) {
+            if (U32(f, p0) != 0) continue;                  // first record's cellA == 0
+            uint kind = U32(f, p0 + 0x18);
             if (kind != 0x10 && kind != 0x20) continue;
-            if (U32(f, pt + 0x20) != 0x38) continue;
-            uint b0 = U32(f, pt + 4);
+            uint b0 = U32(f, p0 + 4);
             if (b0 != 0xFFFFFFFF && b0 >= (uint)nc) continue;
-            p0 = pt; break;
-        }
-        if (p0 < 0) return null;
 
+            var list = WalkFrameDef(f, p0, nc);
+            if (list != null) return list;
+        }
+        return null;
+    }
+    static List<(int a, int b)> WalkFrameDef(byte[] f, int p0, int nc)
+    {
         var list = new List<(int, int)>();
-        int p = p0, acc = 0, guard = 0;
-        while (acc < nc && p + 8 <= f.Length && guard++ < nc + 8) {
-            int a = (int)U32(f, p);
+        int p = p0, acc = 0;
+        while (acc < nc) {
+            if (p + 8 > f.Length || (int)U32(f, p) != acc) return null;
             uint bu = U32(f, p + 4);
-            if (a < 0 || a >= nc) return null;
-            if (bu == 0xFFFFFFFF) { list.Add((a, -1)); acc += 1; }
-            else {
-                if (bu >= (uint)nc) return null;
-                list.Add((a, (int)bu)); acc += 2;
-            }
+            if (bu == 0xFFFFFFFF) { list.Add((acc, -1)); acc += 1; }
+            else if (bu < (uint)nc) { list.Add((acc, (int)bu)); acc += 2; }
+            else return null;
             p += 0x38;
         }
         return acc == nc ? list : null;
@@ -614,9 +617,28 @@ static class Program
         s.Write(len, 0, 4);
         s.Write(t, 0, 4);
         s.Write(data, 0, data.Length);
-        uint crc = Crc32(t, Crc32(data, 0xFFFFFFFF, false), true);
+
+        EnsureCrcTable();
+        uint crc = 0xFFFFFFFF;
+        for (int i = 0; i < t.Length; i++)          // 1. type bytes first
+            crc = _crcT[(crc ^ t[i]) & 0xFF] ^ (crc >> 8);
+        for (int i = 0; i < data.Length; i++)        // 2. data bytes second
+            crc = _crcT[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
+        crc ^= 0xFFFFFFFF;                           // 3. finalize
+
         var c = new byte[4]; WriteBE(c, 0, crc);
         s.Write(c, 0, 4);
+    }
+    static void EnsureCrcTable()
+    {
+        if (_crcT != null) return;
+        _crcT = new uint[256];
+        for (uint n = 0; n < 256; n++) {
+            uint c = n;
+            for (int k = 0; k < 8; k++)
+                c = (c & 1) != 0 ? 0xEDB88320 ^ (c >> 1) : c >> 1;
+            _crcT[n] = c;
+        }
     }
     static byte[] Zlib(byte[] raw)
     {
@@ -631,21 +653,6 @@ static class Program
     }
 
     static uint[] _crcT;
-    static uint Crc32(byte[] data, uint crc, bool final)
-    {
-        if (_crcT == null) {
-            _crcT = new uint[256];
-            for (uint n = 0; n < 256; n++) {
-                uint c = n;
-                for (int k = 0; k < 8; k++)
-                    c = (c & 1) != 0 ? 0xEDB88320 ^ (c >> 1) : c >> 1;
-                _crcT[n] = c;
-            }
-        }
-        for (int i = 0; i < data.Length; i++)
-            crc = _crcT[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
-        return final ? crc ^ 0xFFFFFFFF : crc;
-    }
     static uint Adler32(byte[] data)
     {
         uint a = 1, b = 0;
@@ -724,7 +731,7 @@ static class Program
                 Console.Error.WriteLine($"[{stb_file}] {e.Message}");
             }
         }
-        Console.WriteLine($"Done! Extracted {tables} stb tables.");
+        Console.WriteLine($"Done! Extracted {tables} stb tables.\n");
     }
 
     // ============================================================
